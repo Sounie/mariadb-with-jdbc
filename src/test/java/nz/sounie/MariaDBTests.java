@@ -1,5 +1,6 @@
 package nz.sounie;
 
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MariaDBContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -21,27 +22,33 @@ class MariaDBTests {
 
     // Annotation applied to hook into TestContainers lifecycle management.
     @Container
-    private static final MariaDBContainer<?> postgres = new MariaDBContainer<>("mariadb")
+    private static final MariaDBContainer<?> mariadb = new MariaDBContainer<>("mariadb")
             .withDatabaseName("sampleDB")
             .withUsername(DB_USER)
             .withPassword(PASSWORD);
 
-    @Test
-    void testTransactionIsolationLevel() throws Exception {
-        int transactionReadUncommited = Connection.TRANSACTION_READ_UNCOMMITTED;
-        int transactionReadCommited = Connection.TRANSACTION_READ_COMMITTED;
-
-        assertThat(postgres.isRunning()).isTrue();
-        assertThat(postgres.getHost()).isNotEmpty();
-        assertThat(postgres.getFirstMappedPort()).isGreaterThan(0);
-
-        String jdbcUrl = postgres.getJdbcUrl();
+    @BeforeAll
+    static void setUp() throws SQLException
+    {
+        String jdbcUrl = mariadb.getJdbcUrl();
         System.out.println("JDBC URL: " + jdbcUrl);
 
         // Set up table
         try (Connection connection = DriverManager.getConnection(jdbcUrl, DB_USER, PASSWORD)) {
             createTable(connection);
         }
+    }
+
+    @Test
+    void testTransactionIsolationLevel() throws Exception {
+        String jdbcUrl = mariadb.getJdbcUrl();
+
+        int transactionReadUncommited = Connection.TRANSACTION_READ_UNCOMMITTED;
+        int transactionReadCommited = Connection.TRANSACTION_READ_COMMITTED;
+
+        assertThat(mariadb.isRunning()).isTrue();
+        assertThat(mariadb.getHost()).isNotEmpty();
+        assertThat(mariadb.getFirstMappedPort()).isGreaterThan(0);
 
         UUID id = UUID.randomUUID();
 
@@ -87,11 +94,43 @@ class MariaDBTests {
         executorService.shutdown();
 
         try (Connection connection = DriverManager.getConnection(jdbcUrl, DB_USER, PASSWORD)) {
-            readRow(connection, id, 5);
+            readRow(connection, id, "First event", 5);
         }
     }
 
-    private void outputMetadata(Connection connection) throws SQLException {
+    @Test
+    void testUpdateChangingNoRecords() throws Exception {
+        String jdbcUrl = mariadb.getJdbcUrl();
+
+        // Using properties to allow specifying flag(s) for connection
+        Properties properties = new Properties();
+        properties.put("user", DB_USER);
+        properties.put("password", PASSWORD);
+
+        // Specifying that
+        properties.put("useAffectedRows", true);
+
+        Connection connection = DriverManager.getConnection(jdbcUrl, properties);
+
+        UUID id = UUID.randomUUID();
+
+        Upserter upserter1 = new Upserter(connection, id, "Another event", 5);
+        upserter1.performUpsert();
+
+//        readRow(connection, id, "Another event", 5);
+
+        // Expect this to go down the update path, but not change any data
+        Upserter upserter2 = new Upserter(connection, id, "Another event", 4);
+        upserter2.performUpsert();
+
+        readRow(connection, id, "Another event", 5);
+    }
+
+    @Test
+    void outputMetadata() throws SQLException {
+        String jdbcUrl = mariadb.getJdbcUrl();
+
+        Connection connection = DriverManager.getConnection(jdbcUrl, DB_USER, PASSWORD);
     /* In a real environment, metadata may be useful for ensuring that the provisioned resource
     that is connected to will have the expected capabilities.
     */
@@ -105,11 +144,15 @@ class MariaDBTests {
 
         String timeDateFunctions = metadata.getTimeDateFunctions();
         System.out.println("Time date functions: " + timeDateFunctions);
+
+
     }
 
-    private void readRow(Connection connection, UUID expectedId, int expectedVersion) throws SQLException {
-        try (PreparedStatement readStatement = connection.prepareStatement("SELECT id, name, version from event")) {
+    private void readRow(Connection connection, UUID expectedId, String expectedName, int expectedVersion) throws SQLException {
+        try (PreparedStatement readStatement = connection.prepareStatement("SELECT id, name, version from event" +
+                " where id = ?")) {
             // assert that one result and has name of "First event"
+            readStatement.setObject(1, expectedId);
             readStatement.execute();
 
             try (ResultSet resultSet = readStatement.getResultSet()) {
@@ -119,7 +162,7 @@ class MariaDBTests {
                 int version = resultSet.getInt("version");
                 assertThat(id).isEqualTo(expectedId);
                 assertThat(version).isEqualTo(expectedVersion);
-                assertThat(resultSet.getString("name")).isEqualTo("First event");
+                assertThat(resultSet.getString("name")).isEqualTo(expectedName);
 
                 // Verifying that no unexpected additional results are returned.
                 boolean subsequentResult = resultSet.next();

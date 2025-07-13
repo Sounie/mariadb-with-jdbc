@@ -23,7 +23,8 @@ public class Upserter {
      *
      * @param connection with isolation level set up, based on options available from Connection
      * @param id primary key
-     * @param version
+     * @param name name of entry
+     * @param version value of version being considered for insert / update
      */
     Upserter(Connection connection, UUID id, String name, int version) {
         try {
@@ -32,14 +33,14 @@ public class Upserter {
             // MariaDB doesn't appear to allow specifying a where clause for "on duplicate key update"
             // So we have an update with an ugly check for version on each individual property
 
-            // May need to declare a procedure
+            // May be cleaner to declare a stored procedure with condition check
 
             this.statement =  connection.prepareStatement(
                     """
 INSERT INTO event (id, name, version) VALUES (?, ?, ?)
 ON DUPLICATE KEY UPDATE
-    name = (IF(version < VALUE(version), VALUE(name), name)),
-    version = (IF(version < VALUE(version), VALUE(version), version))
+    name = (IF(version < VALUES(version), VALUES(name), name)),
+    version = (IF(version < VALUES(version), VALUES(version), version))
 """
             );
 
@@ -62,11 +63,20 @@ ON DUPLICATE KEY UPDATE
         try {
             int rowsChanged = statement.executeUpdate();
 
+            System.out.println("rows changed: " + rowsChanged + " for version: " + version);
+
             // Checking to see values returned, as update for on duplicate is documented as returning 2
             // Reference: https://mariadb.com/docs/server/reference/sql-statements/data-manipulation/inserting-loading-data/insert-on-duplicate-key-update
             if (rowsChanged == 1) {
+                // It seems that rowsChanged can be 1 in the situation where an insert was not possible,
+                // and update would not change any state
                 rowChanged = true;
             } else if (rowsChanged == 2) {
+                /* This is useful for being able to detect when the update path was involved and changed state,
+                 * but seems like a misleading use of the row count result.
+                 * In this situation it is reasonable to expect only one row will ever be changed as we are specifying
+                 * a primary key which involves a uniqueness constraint.
+                 */
                 rowChanged = true;
             }
 
